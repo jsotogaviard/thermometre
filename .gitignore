@@ -1,0 +1,6 @@
+venv
+tmp
+include
+tmp/.gitkeep
+.idea
+.pytest_cache

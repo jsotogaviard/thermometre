@@ -72,15 +72,15 @@ def parse_data(now, key, value):
     thermometer.battery_millivolts = battery_millivolts
     counter = int(manufacturer_service_data_hex[12 + 4 + 2 + 2 + 4:12 + 4 + 2 + 2 + 4 + 2], 16)
     thermometer.counter = counter
-    time = now.strftime("%m/%d/%Y, %H:%M:%S")
+    time = now.strftime("%Y%d%m%H%M%S")
     thermometer.time = time
     print(thermometer.mac)
     return thermometer
 
 
-def download_or_create_file_locally(thermometer):
-    local_file_name = create_local_file_name(thermometer)
-    remote_file_name = create_remote_file_name(thermometer)
+def download_or_create_file_locally(now):
+    local_file_name = create_local_file_name(now)
+    remote_file_name = create_remote_file_name(now)
     try:
         s3_client.download_file(BUCKET_NAME, remote_file_name, local_file_name)
     except botocore.exceptions.ClientError as e:
@@ -94,44 +94,87 @@ def download_or_create_file_locally(thermometer):
         f.close()
 
 
-def create_local_file_name(thermometer):
-    return './tmp/' + thermometer.mac;
+def create_local_file_name(now):
+    day = now.strftime("%Y-%d-%m")
+    return './tmp/' + day + '.csv'
 
 
-def create_remote_file_name(thermometer):
-    day = thermometer.now.strftime("%Y-%d-%m")
-    return thermometer.mac + '/' + day + '.csv'
+def create_remote_file_name(now):
+    day = now.strftime("%Y-%d-%m")
+    return '/' + day + '.csv'
 
 
-def write_data_and_upload(thermometer):
-    local_file_name = create_local_file_name(thermometer)
-    remote_file_name = create_remote_file_name(thermometer)
+def write_data_and_upload(now, thermometers_data):
+    local_file_name = create_local_file_name(now)
+    remote_file_name = create_remote_file_name(now)
     my_file = open(local_file_name, 'a+')
     with my_file:
         writer = csv.writer(my_file, lineterminator='\n')
-        writer.writerows([thermometer.toArray()])
+        for thermometer in thermometers_data:
+            writer.writerows([thermometer.toArray()])
     my_file.close()
     s3_client.upload_file(local_file_name, BUCKET_NAME, remote_file_name)
 
 
-async def run():
+async def ble_to_in():
     # scan devices
     devices = await scan_devices()
 
     # filter thermometer devices
     thermometers = filter_thermometer_devices(devices)
 
-    # Main loop
+    # download file locally from server if exists, otherwise create it
+    # with headers
     now = datetime.now()
+    download_or_create_file_locally(now)
+    
+    # Main loop
+    thermometers_data = []
     for key, value in thermometers.items():
+
         # parse manufacturer service data
         thermometer = parse_data(now, key, value)
+        thermometers_data.push(thermometer)
+    
+    # write data and upload it
+    write_data_and_upload(now, thermometers_data)
 
-        # download file locally from server if exists, otherwise create it
-        download_or_create_file_locally(thermometer)
 
-        # write data and upload it
-        write_data_and_upload(thermometer)
+def download_in_files():
+    list=s3_client.list_objects(Bucket=BUCKET_NAME,Prefix='out')['Contents']
+    for key in list:
+        s3_client.download_file(BUCKET_NAME, key['Key'], "./in/" + key['Key'])
+
+
+def create_out_files():
+
+
+
+def upload_out_files():
+    
+
+def in_to_out():
+
+    # download in files
+    download_in_files()
+
+    # create out files
+    create_out_files()
+
+    # upload out files
+    upload_out_files()
+
+
+def run():
+
+    # Retrieve bluetooth advertising data
+    # and put in aws s3 in folder
+    ble_to_in()
+
+    # Transform in data format 
+    # to out data format
+    in_to_out()
+    
 
 
 loop = asyncio.get_event_loop()

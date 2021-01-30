@@ -8,6 +8,8 @@ import os
 
 s3_client = boto3.client('s3')
 
+in_dir = "./in"
+
 BUCKET_NAME = "sotochassaignetest"
 
 
@@ -36,14 +38,17 @@ class Thermometer:
             self.counter
         ]
 
-
-async def scan_devices():
-    scanner = bleak.BleakScanner()
-    await scanner.start()
-    await asyncio.sleep(10.0)
-    await scanner.stop()
-    devices = await scanner.get_discovered_devices()
-    return devices
+    def toHeaderArray(self):
+        return [
+            self.time,
+            self.key,
+            self.mac,
+            self.temperature,
+            self.humidity,
+            self.battery_percentage,
+            self.battery_millivolts,
+            self.counter
+        ]
 
 
 def filter_thermometer_devices(devices):
@@ -78,30 +83,14 @@ def parse_data(now, key, value):
     return thermometer
 
 
-def download_or_create_file_locally(now):
-    local_file_name = create_local_file_name(now)
-    remote_file_name = create_remote_file_name(now)
-    try:
-        s3_client.download_file(BUCKET_NAME, remote_file_name, local_file_name)
-    except botocore.exceptions.ClientError as e:
-        # remove existing file if exists
-        try:
-            os.remove(local_file_name)
-        except FileNotFoundError as e:
-            print(e)
-        # create new empty file
-        f = open(local_file_name, 'a+')
-        f.close()
+def get_in_local_file_name(now):
+    day = now.strftime("%Y%m%d")
+    return './tmp/' + in_dir + '/' + day + '.csv'
 
 
-def create_local_file_name(now):
-    day = now.strftime("%Y-%d-%m")
-    return './tmp/' + day + '.csv'
-
-
-def create_remote_file_name(now):
-    day = now.strftime("%Y-%d-%m")
-    return '/' + day + '.csv'
+def get_in_remote_file_name(now):
+    day = now.strftime("%Y%m%d")
+    return '/' + in_dir + '/' + day + '.csv'
 
 
 def write_data_and_upload(now, thermometers_data):
@@ -116,17 +105,54 @@ def write_data_and_upload(now, thermometers_data):
     s3_client.upload_file(local_file_name, BUCKET_NAME, remote_file_name)
 
 
+# 1.0 function
+def clean_in_local_directory():
+    in_files = [f for f in os.listdir(in_dir)]
+    for in_file in in_files:
+        os.remove(os.path.join(in_dir, in_file))
+
+#1.2 function
+async def scan_devices():
+    scanner = bleak.BleakScanner()
+    await scanner.start()
+    await asyncio.sleep(10.0) #TODO configurable time
+    await scanner.stop()
+    return await scanner.get_discovered_devices()
+
+#1.3 function
+def download_from_in_or_create_in_file_locally(now):
+
+    in_local_file_name = get_in_local_file_name(now)
+    in_remote_file_name = get_in_remote_file_name(now)
+    try:
+        # download file from remote in directory
+        s3_client.download_file(BUCKET_NAME, in_remote_file_name, in_local_file_name)
+    except botocore.exceptions.ClientError as e:
+        # create new empty file with headers
+        thermometer = Thermometer()
+        my_file = open(in_local_file_name, 'a+')
+        with my_file:
+            writer = csv.writer(my_file, lineterminator='\n')
+            writer.writerows([thermometer.toArrayHeaders()])
+        f = open(in_local_file_name, 'a+')
+        f.close()
+
+
 async def ble_to_in():
-    # scan devices
+    # 0. Clean local in directory
+    clean_in_local_directory()
+
+    # 1. Scan devices
     devices = await scan_devices()
 
-    # filter thermometer devices
+    # 2. Filter thermometer devices
     thermometers = filter_thermometer_devices(devices)
 
-    # download file locally from server if exists, otherwise create it
-    # with headers
+    # 3. Download file locally from server if exists, otherwise create it with headers
+    # The in structure contains one file per day
+    # This file contains a thermometer data for each line
     now = datetime.now()
-    download_or_create_file_locally(now)
+    download_from_in_or_create_in_file_locally(now)
     
     # Main loop
     thermometers_data = []
@@ -175,7 +201,6 @@ def run():
     # to out data format
     in_to_out()
     
-
 
 loop = asyncio.get_event_loop()
 loop.run_until_complete(run())

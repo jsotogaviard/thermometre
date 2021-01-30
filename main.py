@@ -5,12 +5,15 @@ import boto3
 import bleak
 import botocore
 import os
+import csv
+import json
 
-s3_client = boto3.client('s3')
+s3 = boto3.client('s3')
 
 in_dir = "./in"
+out_dir = "./out"
 
-BUCKET_NAME = "sotochassaignetest"
+BUCKET_NAME = "sotochassaignetest"  #TODO configurable time
 
 
 class Thermometer:
@@ -40,14 +43,14 @@ class Thermometer:
 
     def toHeaderArray(self):
         return [
-            self.time,
-            self.key,
-            self.mac,
-            self.temperature,
-            self.humidity,
-            self.battery_percentage,
-            self.battery_millivolts,
-            self.counter
+            "time",
+            "key",
+            "mac",
+            "temperature",
+            "humidity",
+            "battery_percentage",
+            "battery_millivolts",
+            "counter"
         ]
 
 
@@ -77,7 +80,7 @@ def parse_data(now, key, value):
     thermometer.battery_millivolts = battery_millivolts
     counter = int(manufacturer_service_data_hex[12 + 4 + 2 + 2 + 4:12 + 4 + 2 + 2 + 4 + 2], 16)
     thermometer.counter = counter
-    time = now.strftime("%Y%d%m%H%M%S")
+    time = now.strftime("%Y%m%d%H%M%S")
     thermometer.time = time
     print(thermometer.mac)
     return thermometer
@@ -93,23 +96,11 @@ def get_in_remote_file_name(now):
     return '/' + in_dir + '/' + day + '.csv'
 
 
-def write_data_and_upload(now, thermometers_data):
-    local_file_name = create_local_file_name(now)
-    remote_file_name = create_remote_file_name(now)
-    my_file = open(local_file_name, 'a+')
-    with my_file:
-        writer = csv.writer(my_file, lineterminator='\n')
-        for thermometer in thermometers_data:
-            writer.writerows([thermometer.toArray()])
-    my_file.close()
-    s3_client.upload_file(local_file_name, BUCKET_NAME, remote_file_name)
-
-
 # 1.0 function
-def clean_in_local_directory():
-    in_files = [f for f in os.listdir(in_dir)]
+def clean_local_directory(dir):
+    in_files = [f for f in os.listdir(dir)]
     for in_file in in_files:
-        os.remove(os.path.join(in_dir, in_file))
+        os.remove(os.path.join(dir, in_file))
 
 #1.2 function
 async def scan_devices():
@@ -126,68 +117,94 @@ def download_from_in_or_create_in_file_locally(now):
     in_remote_file_name = get_in_remote_file_name(now)
     try:
         # download file from remote in directory
-        s3_client.download_file(BUCKET_NAME, in_remote_file_name, in_local_file_name)
+        s3.download_file(BUCKET_NAME, in_remote_file_name, in_local_file_name)
     except botocore.exceptions.ClientError as e:
         # create new empty file with headers
         thermometer = Thermometer()
-        my_file = open(in_local_file_name, 'a+')
-        with my_file:
-            writer = csv.writer(my_file, lineterminator='\n')
-            writer.writerows([thermometer.toArrayHeaders()])
-        f = open(in_local_file_name, 'a+')
-        f.close()
+        in_local_file = open(in_local_file_name, 'a+')
+        with in_local_file:
+            writer = csv.writer(in_local_file, lineterminator='\n')
+            writer.writerows([thermometer.toHeaderArray()])
+        in_local_file.close()
 
+
+#1.4 function
+def write_data_and_upload(now, thermometers):
+    local_file_name = get_in_local_file_name(now)
+    remote_file_name = get_in_remote_file_name(now)
+
+    # open local file
+    local_file = open(local_file_name, 'a+')
+    with local_file:
+        writer = csv.writer(local_file, lineterminator='\n')
+
+        # write thermometer data
+        for key, value in thermometers.items():
+            thermometer = parse_data(now, key, value)
+            writer.writerows([thermometer.toArray()])
+    local_file.close()
+
+    # upload file
+    s3.upload_file(local_file_name, BUCKET_NAME, remote_file_name)
 
 async def ble_to_in():
-    # 0. Clean local in directory
-    clean_in_local_directory()
 
-    # 1. Scan devices
+    # 1.0. Clean local in directory
+    clean_local_directory(in_dir)
+
+    # 1.1. Scan devices
     devices = await scan_devices()
 
-    # 2. Filter thermometer devices
+    # 1.2. Filter thermometer devices
     thermometers = filter_thermometer_devices(devices)
 
-    # 3. Download file locally from server if exists, otherwise create it with headers
+    # 1.3. Download file locally from server if exists, otherwise create it with headers
     # The in structure contains one file per day
     # This file contains a thermometer data for each line
     now = datetime.now()
     download_from_in_or_create_in_file_locally(now)
     
-    # Main loop
-    thermometers_data = []
-    for key, value in thermometers.items():
-
-        # parse manufacturer service data
-        thermometer = parse_data(now, key, value)
-        thermometers_data.push(thermometer)
-    
-    # write data and upload it
-    write_data_and_upload(now, thermometers_data)
+    # 1.4. Write each thermometer in a new line and upload it
+    write_data_and_upload(now, thermometers)
 
 
+# 2.2 function
 def download_in_files():
-    list=s3_client.list_objects(Bucket=BUCKET_NAME,Prefix='out')['Contents']
-    for key in list:
-        s3_client.download_file(BUCKET_NAME, key['Key'], "./in/" + key['Key'])
+    in_files = s3.list_objects(Bucket=BUCKET_NAME,Prefix=in_dir)['Contents']
+    for in_file in in_files:
+        s3.download_file(BUCKET_NAME, in_file['Key'], in_dir + "/" + in_file['Key'])
 
 
+# 2.3 function
 def create_out_files():
+    for root,dirs,in_files in os.walk(in_dir):
+        
+        for in_file_name in in_files:
+            in_file = open(in_file_name, 'r')
+            reader = csv.DictReader(in_file)
+            for row in reader:
+                json_data = json.dumps(row)
 
-
-
+# 2.4 function
 def upload_out_files():
-    
+    for root,dirs,out_files in os.walk(out_dir):
+        for out_file in out_files:
+            s3.upload_file(os.path.join(root,out_file), BUCKET_NAME, out_dir + "/" + out_file)
+
 
 def in_to_out():
 
-    # download in files
+    # 2.1. Clean in and out files
+    clean_local_directory(in_dir)
+    clean_local_directory(out_dir)
+
+    # 2.2 download in files
     download_in_files()
 
-    # create out files
+    # 2.3 create out files
     create_out_files()
 
-    # upload out files
+    # 2.4 upload out files
     upload_out_files()
 
 
